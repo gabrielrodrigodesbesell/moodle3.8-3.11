@@ -224,7 +224,7 @@ class file_storage {
     /**
      * Returns an image file that represent the given stored file as a preview
      *
-     * At the moment, only GIF, JPEG and PNG files are supported to have previews. In the
+     * At the moment, only GIF, JPEG, PNG and SVG files are supported to have previews. In the
      * future, the support for other mimetypes can be added, too (eg. generate an image
      * preview of PDF, text documents etc).
      *
@@ -410,7 +410,9 @@ class file_storage {
         if ($mimetype === 'image/gif' or $mimetype === 'image/jpeg' or $mimetype === 'image/png') {
             // make a preview of the image
             $data = $this->create_imagefile_preview($file, $mode);
-
+        } else if ($mimetype === 'image/svg+xml') {
+            // If we have an SVG image, then return the original (scalable) file.
+            return $file;
         } else {
             // unable to create the preview of this mimetype yet
             return false;
@@ -1858,6 +1860,21 @@ class file_storage {
 
     /**
      * Serve file content using X-Sendfile header.
+     * Please make sure that all headers are already sent and the all
+     * access control checks passed.
+     *
+     * This alternate method to xsendfile() allows an alternate file system
+     * to use the full file metadata and avoid extra lookups.
+     *
+     * @param stored_file $file The file to send
+     * @return bool success
+     */
+    public function xsendfile_file(stored_file $file): bool {
+        return $this->filesystem->xsendfile_file($file);
+    }
+
+    /**
+     * Serve file content using X-Sendfile header.
      * Please make sure that all headers are already sent
      * and the all access control checks passed.
      *
@@ -2214,7 +2231,15 @@ class file_storage {
         if (file_exists($fullpath)) {
             // The type is unknown. Attempt to look up the file type now.
             $finfo = new finfo(FILEINFO_MIME_TYPE);
-            return mimeinfo_from_type('type', $finfo->file($fullpath));
+
+            // See https://bugs.php.net/bug.php?id=79045 - finfo isn't consistent with returned type, normalize into value
+            // that is used internally by the {@see core_filetypes} class and the {@see mimeinfo_from_type} call below.
+            $mimetype = $finfo->file($fullpath);
+            if ($mimetype === 'image/svg') {
+                $mimetype = 'image/svg+xml';
+            }
+
+            return mimeinfo_from_type('type', $mimetype);
         }
 
         return 'document/unknown';
@@ -2243,35 +2268,19 @@ class file_storage {
         $rs->close();
         mtrace('done.');
 
-        // remove orphaned preview files (that is files in the core preview filearea without
-        // the existing original file)
-        mtrace('Deleting orphaned preview files... ', '');
+        // Remove orphaned files:
+        // * preview files in the core preview filearea without the existing original file.
+        // * document converted files in core documentconversion filearea without the existing original file.
+        mtrace('Deleting orphaned preview, and document conversion files... ', '');
         cron_trace_time_and_memory();
         $sql = "SELECT p.*
                   FROM {files} p
              LEFT JOIN {files} o ON (p.filename = o.contenthash)
-                 WHERE p.contextid = ? AND p.component = 'core' AND p.filearea = 'preview' AND p.itemid = 0
-                       AND o.id IS NULL";
-        $syscontext = context_system::instance();
-        $rs = $DB->get_recordset_sql($sql, array($syscontext->id));
-        foreach ($rs as $orphan) {
-            $file = $this->get_file_instance($orphan);
-            if (!$file->is_directory()) {
-                $file->delete();
-            }
-        }
-        $rs->close();
-        mtrace('done.');
-
-        // Remove orphaned converted files (that is files in the core documentconversion filearea without
-        // the existing original file).
-        mtrace('Deleting orphaned document conversion files... ', '');
-        cron_trace_time_and_memory();
-        $sql = "SELECT p.*
-                  FROM {files} p
-             LEFT JOIN {files} o ON (p.filename = o.contenthash)
-                 WHERE p.contextid = ? AND p.component = 'core' AND p.filearea = 'documentconversion' AND p.itemid = 0
-                       AND o.id IS NULL";
+                 WHERE p.contextid = ?
+                   AND p.component = 'core'
+                   AND (p.filearea = 'preview' OR p.filearea = 'documentconversion')
+                   AND p.itemid = 0
+                   AND o.id IS NULL";
         $syscontext = context_system::instance();
         $rs = $DB->get_recordset_sql($sql, array($syscontext->id));
         foreach ($rs as $orphan) {

@@ -167,6 +167,11 @@ class external_api {
             } else {
                 $function->loginrequired = true;
             }
+            if (isset($functions[$function->name]['readonlysession'])) {
+                $function->readonlysession = $functions[$function->name]['readonlysession'];
+            } else {
+                $function->readonlysession = false;
+            }
         }
 
         return $function;
@@ -189,6 +194,12 @@ class external_api {
         require_once($CFG->libdir . "/pagelib.php");
 
         $externalfunctioninfo = static::external_function_info($function);
+
+        // Eventually this should shift into the various handlers and not be handled via config.
+        $readonlysession = $externalfunctioninfo->readonlysession ?? false;
+        if (!$readonlysession || empty($CFG->enable_read_only_sessions)) {
+            \core\session\manager::restart_with_write_lock($readonlysession);
+        }
 
         $currentpage = $PAGE;
         $currentcourse = $COURSE;
@@ -1094,7 +1105,7 @@ function external_generate_token_for_current_user($service) {
             $unsettoken = true;
         }
 
-        // Remove token if its ip not in whitelist.
+        // Remove token if its IP is restricted.
         if (isset($token->iprestriction) and !address_in_subnet(getremoteaddr(), $token->iprestriction)) {
             $unsettoken = true;
         }
@@ -1206,6 +1217,9 @@ class external_settings {
     /** @var string The session lang */
     private $lang = '';
 
+    /** @var string The timezone to use during this WS request */
+    private $timezone = '';
+
     /**
      * Constructor - protected - can not be instanciated
      */
@@ -1216,12 +1230,6 @@ class external_settings {
             // Use pluginfile.php for web requests.
             $this->file = 'pluginfile.php';
         }
-    }
-
-    /**
-     * Clone - private - can not be cloned
-     */
-    private final function __clone() {
     }
 
     /**
@@ -1325,6 +1333,24 @@ class external_settings {
      */
     public function get_lang() {
         return $this->lang;
+    }
+
+    /**
+     * Set timezone
+     *
+     * @param string $timezone
+     */
+    public function set_timezone($timezone) {
+        $this->timezone = $timezone;
+    }
+
+    /**
+     * Get timezone
+     *
+     * @return string
+     */
+    public function get_timezone() {
+        return $this->timezone;
     }
 }
 

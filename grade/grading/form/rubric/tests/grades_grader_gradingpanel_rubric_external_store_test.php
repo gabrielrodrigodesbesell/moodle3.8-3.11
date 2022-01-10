@@ -42,7 +42,7 @@ use moodle_exception;
  * @copyright 2019 Mathew May <mathew.solutions>
  * @license   http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
-class store_test extends advanced_testcase {
+class grades_grader_gradingpanel_rubric_external_store_test extends advanced_testcase {
 
     public static function setupBeforeClass(): void {
         global $CFG;
@@ -154,16 +154,27 @@ class store_test extends advanced_testcase {
 
         $this->assertEquals('gradingform_rubric/grades/grader/gradingpanel', $result['templatename']);
 
-        $this->assertArrayHasKey('grade', $result);
-        $this->assertIsArray($result['grade']);
-
-        $this->assertIsInt($result['grade']['timecreated']);
-        $this->assertArrayHasKey('timemodified', $result['grade']);
-        $this->assertIsInt($result['grade']['timemodified']);
-
         $this->assertArrayHasKey('warnings', $result);
         $this->assertIsArray($result['warnings']);
         $this->assertEmpty($result['warnings']);
+
+        // Test the grade array items.
+        $this->assertArrayHasKey('grade', $result);
+        $this->assertIsArray($result['grade']);
+        $this->assertIsInt($result['grade']['timecreated']);
+
+        $this->assertArrayHasKey('timemodified', $result['grade']);
+        $this->assertIsInt($result['grade']['timemodified']);
+
+        $this->assertArrayHasKey('usergrade', $result['grade']);
+        $this->assertEquals('1.00 / 2.00', $result['grade']['usergrade']);
+
+        $this->assertArrayHasKey('maxgrade', $result['grade']);
+        $this->assertIsInt($result['grade']['maxgrade']);
+        $this->assertEquals(2, $result['grade']['maxgrade']);
+
+        $this->assertArrayHasKey('gradedby', $result['grade']);
+        $this->assertEquals(fullname($teacher), $result['grade']['gradedby']);
 
         $this->assertArrayHasKey('criteria', $result['grade']);
         $criteria = $result['grade']['criteria'];

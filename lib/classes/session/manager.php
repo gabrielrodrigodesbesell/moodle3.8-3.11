@@ -57,6 +57,44 @@ class manager {
     /** @var string $logintokenkey Key used to get and store request protection for login form. */
     protected static $logintokenkey = 'core_auth_login';
 
+    /** @var array Stores the the SESSION before a request is performed, used to check incorrect read-only modes */
+    private static $priorsession = [];
+
+    /**
+     * @var bool Used to trigger the SESSION mutation warning without actually preventing SESSION mutation.
+     * This variable is used to "copy" what the $requireslock parameter  does in start_session().
+     * Once requireslock is set in start_session it's later accessible via $handler->requires_write_lock,
+     * When using $CFG->enable_read_only_sessions_debug mode, this variable serves the same purpose without
+     * actually setting the handler as requiring a write lock.
+     */
+    private static $requireslockdebug;
+
+    /**
+     * If the current session is not writeable, abort it, and re-open it
+     * requesting (and blocking) until a write lock is acquired.
+     * If current session was already opened with an intentional write lock,
+     * this call will not do anything.
+     * NOTE: Even when using a session handler that does not support non-locking sessions,
+     * if the original session was not opened with the explicit intention of being locked,
+     * this will still restart your session so that code behaviour matches as closely
+     * as practical across environments.
+     *
+     * @param bool $readonlysession Used by debugging logic to determine if whatever
+     *                              triggered the restart (e.g., a webservice) declared
+     *                              itself as read only.
+     */
+    public static function restart_with_write_lock(bool $readonlysession) {
+        global $CFG;
+
+        self::$requireslockdebug = !$readonlysession;
+
+        if (self::$sessionactive && !self::$handler->requires_write_lock()) {
+            @self::$handler->abort();
+            self::$sessionactive = false;
+            self::start_session(true);
+        }
+    }
+
     /**
      * Start user session.
      *
@@ -82,8 +120,37 @@ class manager {
             return;
         }
 
+        if (defined('READ_ONLY_SESSION') && !empty($CFG->enable_read_only_sessions)) {
+            $requireslock = !READ_ONLY_SESSION;
+        } else {
+            $requireslock = true; // For backwards compatibility, we default to assuming that a lock is needed.
+        }
+
+        // By default make the two variables the same. This means that when they are
+        // checked below in start_session and write_close there is no possibility for
+        // the debug version to "accidentally" execute the debug mode.
+        self::$requireslockdebug = $requireslock;
+        if (defined('READ_ONLY_SESSION') && !empty($CFG->enable_read_only_sessions_debug)) {
+            // Only change the debug variable if READ_ONLY_SESSION is declared,
+            // as would happen with the real requireslock variable.
+            self::$requireslockdebug = !READ_ONLY_SESSION;
+        }
+
+        self::start_session($requireslock);
+    }
+
+    /**
+     * Handles starting a session.
+     *
+     * @param bool $requireslock If this is false then no write lock will be acquired,
+     *                           and the session will be read-only.
+     */
+    private static function start_session(bool $requireslock) {
+        global $PERF, $CFG;
+
         try {
             self::$handler->init();
+            self::$handler->set_requires_write_lock($requireslock);
             self::prepare_cookies();
             $isnewsession = empty($_COOKIE[session_name()]);
 
@@ -98,6 +165,18 @@ class manager {
             self::initialise_user_session($isnewsession);
             self::$sessionactive = true; // Set here, so the session can be cleared if the security check fails.
             self::check_security();
+
+            if (!$requireslock || !self::$requireslockdebug) {
+                self::$priorsession = (array) $_SESSION['SESSION'];
+            }
+
+            if (!empty($CFG->enable_read_only_sessions) && isset($_SESSION['SESSION']->cachestore_session)) {
+                $caches = join(', ', array_keys($_SESSION['SESSION']->cachestore_session));
+                $caches = str_replace('default_session-', '', $caches);
+                throw new \moodle_exception("The session caches can not be in the session store when "
+                    . "enable_read_only_sessions is enabled. Please map all session mode caches to be outside of the "
+                    . "default session store before enabling this features. Found these definitions in the session: $caches");
+            }
 
             // Link global $USER and $SESSION,
             // this is tricky because PHP does not allow references to references
@@ -633,9 +712,7 @@ class manager {
         $DB->delete_records('sessions', array('sid'=>$sid));
         self::init_empty_session();
         self::add_session_record($_SESSION['USER']->id); // Do not use $USER here because it may not be set up yet.
-        session_write_close();
-        self::$sessionactive = false;
-
+        self::write_close();
         self::append_samesite_cookie_attribute();
     }
 
@@ -644,7 +721,7 @@ class manager {
      * Unblocks the sessions, other scripts may start executing in parallel.
      */
     public static function write_close() {
-        global $PERF;
+        global $PERF, $ME, $CFG;
 
         if (self::$sessionactive) {
             // Grab the time when session lock is released.
@@ -655,27 +732,46 @@ class manager {
             $PERF->sessionlock['url'] = me();
             self::update_recent_session_locks($PERF->sessionlock);
             self::sessionlock_debugging();
+
+            $requireslock = self::$handler->requires_write_lock();
+            if (!$requireslock || !self::$requireslockdebug) {
+                // Compare the array of the earlier session data with the array now, if
+                // there is a difference then a lock is required.
+                $arraydiff = self::array_session_diff(
+                    self::$priorsession,
+                    (array) $_SESSION['SESSION']
+                );
+
+                if ($arraydiff) {
+                    $error = "Script $ME defined READ_ONLY_SESSION but the following SESSION attributes were changed:";
+                    foreach ($arraydiff as $key => $value) {
+                        $error .= ' $SESSION->' . $key;
+                    }
+                    // This will emit an error if debugging is on, even if $CFG->enable_read_only_sessions
+                    // is not true as we need to surface this class of errors.
+                    // @codingStandardsIgnoreStart
+                    error_log($error);
+                    // @codingStandardsIgnoreEnd
+                }
+            }
         }
 
-        if (version_compare(PHP_VERSION, '5.6.0', '>=')) {
-            // More control over whether session data
-            // is persisted or not.
-            if (self::$sessionactive && session_id()) {
-                // Write session and release lock only if
-                // indication session start was clean.
-                session_write_close();
-            } else {
-                // Otherwise, if possibile lock exists want
-                // to clear it, but do not write session.
-                @session_abort();
-            }
+        // More control over whether session data
+        // is persisted or not.
+        if (self::$sessionactive && session_id()) {
+            // Write session and release lock only if
+            // indication session start was clean.
+            self::$handler->write_close();
         } else {
-            // Any indication session was started, attempt
-            // to close it.
-            if (self::$sessionactive || session_id()) {
-                session_write_close();
+            // Otherwise, if possible lock exists want
+            // to clear it, but do not write session.
+            // If the $handler has not been set then
+            // there is no session to abort.
+            if (isset(self::$handler)) {
+                @self::$handler->abort();
             }
         }
+
         self::$sessionactive = false;
     }
 
@@ -906,12 +1002,12 @@ class manager {
             $rs->close();
 
             // Kill sessions of users with disabled plugins.
-            $auth_sequence = get_enabled_auth_plugins(true);
-            $auth_sequence = array_flip($auth_sequence);
-            unset($auth_sequence['nologin']); // No login means user cannot login.
-            $auth_sequence = array_flip($auth_sequence);
+            $authsequence = get_enabled_auth_plugins();
+            $authsequence = array_flip($authsequence);
+            unset($authsequence['nologin']); // No login means user cannot login.
+            $authsequence = array_flip($authsequence);
 
-            list($notplugins, $params) = $DB->get_in_or_equal($auth_sequence, SQL_PARAMS_QM, '', false);
+            list($notplugins, $params) = $DB->get_in_or_equal($authsequence, SQL_PARAMS_QM, '', false);
             $rs = $DB->get_recordset_select('sessions', "userid IN (SELECT id FROM {user} WHERE auth $notplugins)", $params, 'id DESC', 'id, sid');
             foreach ($rs as $session) {
                 self::kill_session($session->sid);
@@ -926,7 +1022,7 @@ class manager {
             $params = array('purgebefore' => (time() - $maxlifetime), 'guestid'=>$CFG->siteguest);
 
             $authplugins = array();
-            foreach ($auth_sequence as $authname) {
+            foreach ($authsequence as $authname) {
                 $authplugins[$authname] = get_auth_plugin($authname);
             }
             $rs = $DB->get_recordset_sql($sql, $params);
@@ -1214,6 +1310,12 @@ class manager {
             return;
         }
 
+        $readonlysession = defined('READ_ONLY_SESSION') && READ_ONLY_SESSION;
+        $readonlydebugging = !empty($CFG->enable_read_only_sessions) || !empty($CFG->enable_read_only_sessions_debug);
+        if ($readonlysession && $readonlydebugging) {
+            return;
+        }
+
         $SESSION->recentsessionlocks = self::get_recent_session_locks();
         array_push($SESSION->recentsessionlocks, $sessionlock);
 
@@ -1316,5 +1418,28 @@ class manager {
                 debugging($output, DEBUG_DEVELOPER);
             }
         }
+    }
+
+    /**
+     * Compares two arrays outputs the difference.
+     *
+     * Note this does not use array_diff_assoc due to
+     * the use of stdClasses in Moodle sessions.
+     *
+     * @param array $array1
+     * @param array $array2
+     * @return array
+     */
+    private static function array_session_diff(array $array1, array $array2) : array {
+        $difference = [];
+        foreach ($array1 as $key => $value) {
+            if (!isset($array2[$key])) {
+                $difference[$key] = $value;
+            } else if ($array2[$key] !== $value) {
+                $difference[$key] = $value;
+            }
+        }
+
+        return $difference;
     }
 }

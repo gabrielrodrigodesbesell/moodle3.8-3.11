@@ -42,7 +42,7 @@ use moodle_exception;
  * @copyright 2019 Andrew Nicols <andrew@nicols.co.uk>
  * @license   http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
-class fetch_test extends advanced_testcase {
+class grades_grader_gradingpanel_point_external_fetch_test extends advanced_testcase {
 
     public static function setupBeforeClass(): void {
         global $CFG;
@@ -122,18 +122,30 @@ class fetch_test extends advanced_testcase {
 
         $this->assertEquals('core_grades/grades/grader/gradingpanel/point', $result['templatename']);
 
+        $this->assertArrayHasKey('warnings', $result);
+        $this->assertIsArray($result['warnings']);
+        $this->assertEmpty($result['warnings']);
+
+        // Test the grade array items.
         $this->assertArrayHasKey('grade', $result);
         $this->assertIsArray($result['grade']);
+
         $this->assertArrayHasKey('grade', $result['grade']);
         $this->assertEmpty($result['grade']['grade']);
-        $this->assertArrayHasKey('timecreated', $result['grade']);
+
         $this->assertIsInt($result['grade']['timecreated']);
         $this->assertArrayHasKey('timemodified', $result['grade']);
         $this->assertIsInt($result['grade']['timemodified']);
 
-        $this->assertArrayHasKey('warnings', $result);
-        $this->assertIsArray($result['warnings']);
-        $this->assertEmpty($result['warnings']);
+        $this->assertArrayHasKey('usergrade', $result['grade']);
+        $this->assertEquals('- / 5.00', $result['grade']['usergrade']);
+
+        $this->assertArrayHasKey('maxgrade', $result['grade']);
+        $this->assertIsInt($result['grade']['maxgrade']);
+        $this->assertEquals(5, $result['grade']['maxgrade']);
+
+        $this->assertArrayHasKey('gradedby', $result['grade']);
+        $this->assertEquals(null, $result['grade']['gradedby']);
     }
 
     /**
@@ -210,19 +222,33 @@ class fetch_test extends advanced_testcase {
 
         $this->assertEquals('core_grades/grades/grader/gradingpanel/point', $result['templatename']);
 
+        $this->assertArrayHasKey('warnings', $result);
+        $this->assertIsArray($result['warnings']);
+        $this->assertEmpty($result['warnings']);
+
+        // Test the grade array items.
         $this->assertArrayHasKey('grade', $result);
         $this->assertIsArray($result['grade']);
+
         $this->assertArrayHasKey('grade', $result['grade']);
         $this->assertIsFloat($result['grade']['grade']);
         $this->assertEquals(grade_floatval(unformat_float(4)), $result['grade']['grade']);
-        $this->assertArrayHasKey('timecreated', $result['grade']);
+
         $this->assertIsInt($result['grade']['timecreated']);
         $this->assertArrayHasKey('timemodified', $result['grade']);
         $this->assertIsInt($result['grade']['timemodified']);
 
-        $this->assertArrayHasKey('warnings', $result);
-        $this->assertIsArray($result['warnings']);
-        $this->assertEmpty($result['warnings']);
+        $this->assertArrayHasKey('usergrade', $result['grade']);
+        $this->assertEquals('4.00 / 5.00', $result['grade']['usergrade']);
+
+        $this->assertArrayHasKey('maxgrade', $result['grade']);
+        $this->assertIsInt($result['grade']['maxgrade']);
+        $this->assertEquals(5, $result['grade']['maxgrade']);
+
+        $this->assertArrayHasKey('gradedby', $result['grade']);
+        $this->assertEquals(fullname($grader), $result['grade']['gradedby']);
+
+        return $result;
     }
 
     /**
